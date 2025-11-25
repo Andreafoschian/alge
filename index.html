@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sincronizzatore ALGE</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        body { touch-action: manipulation; }
+        /* Animazione pulsante */
+        @keyframes pulse-gentle {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+        .animate-pulse-gentle {
+            animation: pulse-gentle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-300">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+        // --- Funzioni Ausiliarie ---
+
+        const pad = (num) => String(num).padStart(2, '0');
+
+        const ALGE_TARGET_TIME_STR = '12:00:00'; 
+        const ALGE_TARGET_SECONDS = 12 * 3600; // 43200 secondi
+
+        // Gestione Audio
+        let audioContext = null;
+        try {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (e) {
+            console.error("Web Audio API non disponibile.");
+        }
+
+        const playBeep = (freq = 440, duration = 0.1, volume = 0.5) => {
+            if (!audioContext) return;
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(freq, audioContext.currentTime);
+            gainNode.gain.setValueAtTime(volume, audioContext.currentTime);
+
+            oscillator.start();
+            oscillator.stop(audioContext.currentTime + duration);
+        };
+
+        const speak = (text) => {
+            if (!('speechSynthesis' in window)) return;
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'it-IT';
+            const voices = window.speechSynthesis.getVoices();
+            const italianVoice = voices.find(voice => voice.lang === 'it-IT');
+            if (italianVoice) utterance.voice = italianVoice;
+            window.speechSynthesis.speak(utterance);
+        };
+
+        const getDefaultSetupTime = () => {
+            const now = new Date();
+            const fortyFiveMinutesAgo = new Date(now.getTime() - (45 * 60 * 1000));
+            return `${pad(fortyFiveMinutesAgo.getHours())}:${pad(fortyFiveMinutesAgo.getMinutes())}:00`;
+        };
+
+        // --- Componente Principale App ---
+        
+        const App = () => {
+            const [currentTime, setCurrentTime] = useState(Date.now());
+            
+            // Stati Input
+            const [targetRaceTimeStr, setTargetRaceTimeStr] = useState('10:00:00'); 
+            const [prepMinutes, setPrepMinutes] = useState(3); 
+            const [algeSetupTimeStr, setAlgeSetupTimeStr] = useState(getDefaultSetupTime()); 
+            
+            // Stati di Controllo
+            const [message, setMessage] = useState('');
+            const [isChronometerActive, setIsChronometerActive] = useState(false);
+            const [hasCountdownFinished, setHasCountdownFinished] = useState(false);
+            
+            // NUOVO STATO: isRunning
+            const [isRunning, setIsRunning] = useState(false);
+
+            const intervalRef = useRef(null);
+            
+            // Ref per lo scroll alla configurazione
+            const configSectionRef = useRef(null);
+
+            // Timer principale (aggiorna l'ora corrente)
+            useEffect(() => {
+                intervalRef.current = setInterval(() => {
+                    setCurrentTime(Date.now());
+                }, 1000);
+                return () => clearInterval(intervalRef.current);
+            }, []);
+
+            // Logica gestione timestamp (con fix 12 ore)
+            const getFutureTimestamp = useCallback((timeString) => {
+                if (!timeString) return null;
+                const parts = timeString.split(':').map(p => parseInt(p, 10));
+                const hours = parts[0] || 0;
+                const minutes = parts[1] || 0;
+                const seconds = parts[2] || 0; 
+                
+                if (isNaN(hours) || isNaN(minutes) || isNaN(seconds)) return null;
+
+                const now = new Date(currentTime);
+                let date = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, seconds, 0);
+
+                if (date.getTime() < now.getTime() - (12 * 60 * 60 * 1000)) { 
+                    date.setDate(date.getDate() + 1);
+                }
+                return date.getTime();
+            }, [currentTime]);
+
+            // Calcoli
+            const { 
+                countdown, 
+                totalRemainingSeconds, 
+                isTargetSet, 
+                algeSetupTimeDisplay, 
+                algeSetTimeDisplay,
+                raceTriggerTimeDisplay,
+                isLogicValid,
+                setupTimestamp,
+                algeStartSeconds 
+            } = useMemo(() => {
+                const raceTimeMs = getFutureTimestamp(targetRaceTimeStr);
+                const raceTriggerTimestamp = raceTimeMs ? raceTimeMs - (prepMinutes * 60 * 1000) : null;
+                const setupTimestampVal = getFutureTimestamp(algeSetupTimeStr); 
+
+                const isSet = raceTimeMs && setupTimestampVal && targetRaceTimeStr !== '00:00' && algeSetupTimeStr !== '00:00';
+                
+                if (!isSet) {
+                    return { 
+                        countdown: null, totalRemainingSeconds: null, isTargetSet: false, 
+                        algeSetupTimeDisplay: null, algeSetTimeDisplay: '00:00:00', raceTriggerTimeDisplay: null,
+                        isLogicValid: true, setupTimestamp: null, algeStartSeconds: 0
+                    };
+                }
+                
+                const setupDate = new Date(setupTimestampVal);
+                const triggerDate = new Date(raceTriggerTimestamp);
+                const raceTriggerTimeDisp = `${pad(triggerDate.getHours())}:${pad(triggerDate.getMinutes())}:${pad(triggerDate.getSeconds())}`;
+                
+                const isValid = setupTimestampVal < raceTriggerTimestamp;
+                
+                let algeSetTime = 'ERRORE';
+                let algeStartTimeSecondsVal = 0;
+                
+                if (isValid) {
+                    const timeDifferenceMs = raceTriggerTimestamp - setupTimestampVal;
+                    const timeDifferenceSeconds = Math.floor(timeDifferenceMs / 1000); 
+                    
+                    algeStartTimeSecondsVal = ALGE_TARGET_SECONDS - timeDifferenceSeconds;
+                    const oneDaySeconds = 24 * 3600;
+                    algeStartTimeSecondsVal = (algeStartTimeSecondsVal % oneDaySeconds + oneDaySeconds) % oneDaySeconds;
+
+                    const algeH = Math.floor(algeStartTimeSecondsVal / 3600);
+                    const algeM = Math.floor((algeStartTimeSecondsVal % 3600) / 60);
+                    const algeS = algeStartTimeSecondsVal % 60;
+                    algeSetTime = `${pad(algeH)}:${pad(algeM)}:${pad(algeS)}`;
+                }
+                
+                const algeSetupTimeDisp = `${pad(setupDate.getHours())}:${pad(setupDate.getMinutes())}:${pad(setupDate.getSeconds())}`;
+                const remainingMilliseconds = setupTimestampVal - currentTime;
+                const totalSecs = Math.floor(remainingMilliseconds / 1000);
+
+                if (totalSecs <= 0) { 
+                   return { 
+                      countdown: '00:00:00', totalRemainingSeconds: 0, isTargetSet: true,
+                      algeSetupTimeDisplay: algeSetupTimeDisp, algeSetTimeDisplay: algeSetTime,
+                      raceTriggerTimeDisplay: raceTriggerTimeDisp, isLogicValid: isValid,
+                      setupTimestamp: setupTimestampVal, algeStartSeconds: algeStartTimeSecondsVal
+                   };
+                }
+
+                const seconds = totalSecs % 60;
+                const totalMinutes = Math.floor(totalSecs / 60);
+                const minutes = totalMinutes % 60;
+                const totalHours = Math.floor(totalMinutes / 60);
+                
+                return {
+                    countdown: `${pad(totalHours)}:${pad(minutes)}:${pad(seconds)}`,
+                    totalRemainingSeconds: totalSecs, isTargetSet: true,
+                    algeSetupTimeDisplay: algeSetupTimeDisp, algeSetTimeDisplay: algeSetTime,
+                    raceTriggerTimeDisplay: raceTriggerTimeDisp, isLogicValid: isValid,
+                    setupTimestamp: setupTimestampVal, algeStartSeconds: algeStartTimeSecondsVal
+                };
+            }, [currentTime, targetRaceTimeStr, prepMinutes, algeSetupTimeStr, getFutureTimestamp]);
+
+            // Effetto Audio
+            useEffect(() => {
+                if (!isRunning) return; 
+                if (totalRemainingSeconds === null || totalRemainingSeconds < 0 || !isLogicValid || hasCountdownFinished) return;
+
+                if (totalRemainingSeconds <= 10 && totalRemainingSeconds > 0) {
+                    playBeep(440, 0.1, 0.5); 
+                    if (totalRemainingSeconds <= 5) speak(String(totalRemainingSeconds));
+                } else if (totalRemainingSeconds === 0) {
+                    playBeep(880, 0.5, 0.7); 
+                    speak("Via"); 
+                    setHasCountdownFinished(true);
+                    setIsRunning(false); 
+                }
+            }, [totalRemainingSeconds, isLogicValid, hasCountdownFinished, isRunning]); 
+
+            // Funzioni Handler
+            const handleStartCountdown = () => {
+                if (audioContext && audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                setIsRunning(true);
+                setMessage('Countdown avviato.');
+            };
+
+            const handleStopCountdown = () => {
+                setIsRunning(false);
+                setMessage('Countdown in pausa. Modifica i dati o riavvia.');
+            };
+
+            const handleBackToSetup = () => {
+                setIsChronometerActive(false);
+                setHasCountdownFinished(false); 
+                setIsRunning(false);
+                setMessage('Cronometro chiuso.');
+            };
+            
+            const handleShowChronometer = () => {
+                setIsChronometerActive(true);
+                setMessage('Cronometro ALGE visualizzato.');
+            };
+
+            const resetRunningState = () => {
+                if (isRunning) {
+                    setIsRunning(false);
+                    setHasCountdownFinished(false);
+                }
+            };
+
+            // Funzione per scrollare alla sezione configurazione
+            const scrollToConfig = () => {
+                configSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
+                setMessage('Configurazione ALGE');
+            };
+
+            const handleRaceTimeChange = (e) => { 
+                resetRunningState();
+                setTargetRaceTimeStr(e.target.value); 
+                setMessage(''); 
+            };
+            
+            const handlePrepMinutesChange = (e) => {
+                resetRunningState();
+                const value = parseInt(e.target.value, 10);
+                setPrepMinutes((isNaN(value) || value < 0) ? 0 : value);
+                setMessage('');
+            };
+            
+            const handleSetupTimeChange = (e) => { 
+                resetRunningState();
+                setAlgeSetupTimeStr(e.target.value); 
+                setMessage(''); 
+            };
+
+            // Calcolo display per il cronometro attivo
+            const algeChronometerTime = useMemo(() => {
+                if (!isChronometerActive || !isLogicValid || !setupTimestamp || algeStartSeconds === null) return ALGE_TARGET_TIME_STR;
+                
+                const elapsedMs = currentTime - setupTimestamp;
+                const elapsedSeconds = Math.floor(elapsedMs / 1000);
+                let totalAlgeSeconds = algeStartSeconds + elapsedSeconds;
+                const twelveHoursSeconds = 12 * 3600;
+                totalAlgeSeconds %= twelveHoursSeconds;
+
+                const algeH = Math.floor(totalAlgeSeconds / 3600);
+                const algeM = Math.floor((totalAlgeSeconds % 3600) / 60);
+                const algeS = totalAlgeSeconds % 60;
+
+                return `${pad(algeH)}:${pad(algeM)}:${pad(algeS)}`;
+            }, [isChronometerActive, isLogicValid, setupTimestamp, currentTime, algeStartSeconds]);
+
+            const currentDisplayTime = useMemo(() => {
+                const date = new Date(currentTime);
+                return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+            }, [currentTime]);
+
+            // --- RENDER ---
+            
+            // Schermata Cronometro Attivo
+            if (isChronometerActive && isLogicValid) {
+                return (
+                    <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-2 md:p-4">
+                        <div className="text-center p-4 md:p-8 bg-gray-800 rounded-2xl shadow-2xl border-2 md:border-4 border-green-500 w-full max-w-4xl">
+                            <p className="text-xl md:text-4xl font-semibold text-green-400 mb-4 md:mb-8 uppercase tracking-wider">
+                                CRONOMETRO ALGE
+                            </p>
+                            
+                            <div className="flex justify-center items-center overflow-hidden">
+                                <p className="text-5xl sm:text-7xl md:text-9xl font-extrabold font-mono text-white tracking-widest leading-none">
+                                    {algeChronometerTime}
+                                </p>
+                            </div>
+                            
+                            <p className="text-sm md:text-xl text-gray-400 mt-4 md:mt-6">
+                                (Confronta questo orario con ALGE)
+                            </p>
+                        </div>
+                        <button onClick={handleBackToSetup} className="mt-8 md:mt-12 px-6 md:px-8 py-2 md:py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-base md:text-lg rounded-full shadow-lg transition duration-300 active:scale-95">
+                            Torna al Setup
+                        </button>
+                    </div>
+                );
+            }
+            
+            // Schermata Setup
+            return (
+                <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex items-center justify-center p-2 md:p-4 transition-colors duration-300">
+                    <div className="w-full max-w-lg bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-4 md:p-8 border border-gray-200 dark:border-gray-700">
+                        
+                        {/* HEADER */}
+                        <div className="text-center mb-6">
+                            <h1 className="text-2xl md:text-3xl font-extrabold text-blue-600 dark:text-blue-400 leading-tight">
+                                Sincronizzatore ALGE
+                            </h1>
+                            <p className="text-xs md:text-sm text-gray-500 dark:text-gray-400 font-mono mt-1">
+                                Versione 3.2 by Fox
+                            </p>
+
+                            {/* NUOVI PULSANTI NAVIGATION */}
+                            <div className="flex flex-col sm:flex-row justify-center gap-3 mt-4 px-2">
+                                <a href="tutorial.html" className="inline-flex items-center justify-center px-4 py-2 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200 rounded-lg text-sm font-semibold transition-all duration-200 shadow-sm">
+                                    <span className="mr-2">📚</span> Vedi tutorial passo passo
+                                </a>
+                                <button onClick={scrollToConfig} className="inline-flex items-center justify-center px-4 py-2 bg-blue-100 dark:bg-blue-900/40 hover:bg-blue-200 dark:hover:bg-blue-800/60 text-blue-700 dark:text-blue-300 rounded-lg text-sm font-semibold transition-all duration-200 shadow-sm">
+                                    <span className="mr-2">⚙️</span> Configura ALGE
+                                </button>
+                            </div>
+                        </div>
+                        
+                        {/* ORA ATTUALE */}
+                        <div className="mb-6 p-3 bg-gray-50 dark:bg-gray-700 rounded-xl shadow-inner flex justify-between items-center">
+                            <span className="text-xs md:text-sm font-medium text-gray-700 dark:text-gray-300">Ora: (verifica che sia la stessa delle stazioni)</span>
+                            <span className="text-xl md:text-2xl font-mono font-bold text-gray-900 dark:text-white">{currentDisplayTime}</span>
+                        </div>
+                        
+                        {/* INPUTS (con REF per lo scroll) */}
+                        <div ref={configSectionRef} className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4 text-sm md:text-base scroll-mt-6">
+                            <div className="mb-2 md:col-span-1">
+                                <label className="block font-medium text-gray-700 dark:text-gray-300 mb-1">1. Ora Inizio Gara</label>
+                                <input type="text" value={targetRaceTimeStr} onChange={handleRaceTimeChange} placeholder="10:00:00" className="w-full p-2 border-2 border-blue-300 dark:border-blue-600 rounded-lg font-mono text-gray-800 dark:text-gray-100 bg-white dark:bg-gray-900" />
+                            </div>
+
+                            <div className="mb-2 md:col-span-1">
+                                <label className="block font-medium text-gray-700 dark:text-gray-300 mb-1">2. Minuti Prepartenza</label>
+                                <input type="number" min="0" value={prepMinutes} onChange={handlePrepMinutesChange} placeholder="0" className="w-full p-2 border-2 border-green-300 dark:border-green-600 rounded-lg font-mono text-gray-800 dark:text-gray-100 bg-white dark:bg-gray-900" />
+                            </div>
+                            
+                            <div className="mb-4 md:col-span-2">
+                                <label className="block font-medium text-gray-700 dark:text-gray-300 mb-1">3. Ora di Preimpostazione ALGE</label>
+                                <input type="text" value={algeSetupTimeStr} onChange={handleSetupTimeChange} placeholder="08:30:00" className="w-full p-2 border-2 border-purple-300 dark:border-purple-600 rounded-lg font-mono text-gray-800 dark:text-gray-100 bg-white dark:bg-gray-900" />
+                            </div>
+                        </div>
+
+                        {/* RISULTATI */}
+                        <div className={`p-4 rounded-xl shadow-lg transition-all duration-500 ${isTargetSet ? 'bg-purple-50 dark:bg-purple-900 border-l-4 border-purple-500' : 'bg-red-50 dark:bg-red-900/50 border-l-4 border-red-500'}`}>
+                            
+                            {/* Errore Logico */}
+                            {!isLogicValid && isTargetSet && (
+                                <div className="mb-3 p-2 bg-red-100 dark:bg-red-700 rounded border border-red-400 text-red-800 dark:text-red-100 text-xs font-bold">
+                                    ERRORE: L'Ora Setup deve essere prima dell'Ora Gara.
+                                </div>
+                            )}
+
+                            {/* Valore Statico ALGE */}
+                            <div className={`mb-4 p-3 rounded-lg border ${isLogicValid ? 'bg-white dark:bg-gray-800 border-blue-200 dark:border-blue-700' : 'bg-gray-200 dark:bg-gray-700'}`}>
+                                <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Imposta ALGE su:</p>
+                                <p className={`text-2xl md:text-3xl font-extrabold font-mono ${isLogicValid ? 'text-blue-600 dark:text-blue-400' : 'text-gray-500'}`}>
+                                    {isLogicValid ? algeSetTimeDisplay : '--:--:--'}
+                                </p>
+                            </div>
+
+                            {/* SEZIONE CONTROLLO COUNTDOWN */}
+                            {isTargetSet && isLogicValid && (
+                                <div className="mt-2 pt-2 border-t border-purple-200 dark:border-purple-700 text-center">
+                                    
+                                    {/* CASO 1: NON ANCORA AVVIATO */}
+                                    {!isRunning && !hasCountdownFinished && (
+                                        <div className="mt-2">
+                                            <p className="text-sm text-gray-600 dark:text-gray-300 mb-3">Dati inseriti. Pronto?</p>
+                                            <button 
+                                                onClick={handleStartCountdown}
+                                                className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-md animate-pulse-gentle transition-transform active:scale-95"
+                                            >
+                                                CONFERMA LE IMPOSTAZIONI
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* CASO 2: IN ESECUZIONE */}
+                                    {isRunning && (
+                                        <div>
+                                            <p className="text-sm text-purple-700 dark:text-purple-300 font-semibold italic mb-1">Premi start tra:</p>
+                                            <p className="text-4xl md:text-6xl font-extrabold font-mono text-purple-700 dark:text-purple-100">
+                                                {countdown}
+                                            </p>
+                                            <button onClick={handleStopCountdown} className="mt-4 text-xs text-red-500 hover:text-red-700 underline">
+                                                Modifica Dati / Ferma
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* CASO 3: FINITO */}
+                                    {hasCountdownFinished && (
+                                        <div>
+                                            <p className="text-4xl font-extrabold text-green-600 mb-4">VIA!</p>
+                                            <button onClick={handleShowChronometer} className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-full shadow-lg transform hover:scale-105">
+                                                Vedi Cronometro ALGE
+                                            </button>
+                                            <div className="mt-2">
+                                                <button onClick={handleBackToSetup} className="text-xs text-gray-500 underline mt-2">Resetta</button>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                </div>
+                            )}
+                        </div>
+                        <p className="mt-4 text-center text-xs text-gray-500 dark:text-gray-400 min-h-[20px]">{message}</p>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+```

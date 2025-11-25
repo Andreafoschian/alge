@@ -1,0 +1,4 @@
+Caricare i file index.html e tutorial.html su un sito
+Esempio su foschian.it/alge
+
+Aprendo il sito da un qualsiasi browser quindi anche da smatphone sarà possibile accedere alla app per sincronizzare l'orologi alge
